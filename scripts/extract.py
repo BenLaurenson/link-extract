@@ -13,6 +13,9 @@ from urllib.parse import urlparse, quote
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+# Instagram serves full caption HTML to bots but rate-limits browser UAs
+IG_USER_AGENT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+
 
 def fetch(url: str, max_bytes: int = 500_000) -> str:
     """Fetch URL content as text."""
@@ -27,7 +30,10 @@ def _try_embed(shortcode: str) -> tuple[str, str]:
     embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
     for attempt in range(2):
         try:
-            raw = fetch(embed_url, max_bytes=1_000_000)
+            # Use bot UA — Instagram serves full caption HTML to crawlers
+            req = Request(embed_url, headers={"User-Agent": IG_USER_AGENT, "Accept": "text/html"})
+            with urlopen(req, timeout=15) as resp:
+                raw = resp.read(1_000_000).decode("utf-8", errors="replace")
             caption = ""
             # Method 1: Caption div with CaptionUsername
             cap_start = raw.find('class="Caption"')
@@ -36,11 +42,15 @@ def _try_embed(shortcode: str) -> tuple[str, str]:
                 a_end = chunk.find('</a>')
                 if a_end != -1:
                     rest = chunk[a_end + 4:]
-                    for end_marker in ['class="CaptionComments"', '</div>']:
-                        end_idx = rest.find(end_marker)
-                        if end_idx != -1:
-                            caption = rest[:end_idx]
-                            break
+                    # Find end: CaptionComments div or closing </div>
+                    import re as _re
+                    end_match = _re.search(r'class="CaptionComments"|<div\s|<div>', rest)
+                    if end_match:
+                        caption = rest[:end_match.start()]
+                    else:
+                        # Last resort: take up to closing </div>
+                        end_idx = rest.find('</div>')
+                        caption = rest[:end_idx] if end_idx != -1 else rest[:5000]
             # Method 2: JSON in embed page
             if not caption:
                 m = re.search(r'"edge_media_to_caption".*?"text"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, re.DOTALL)
